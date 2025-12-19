@@ -9,11 +9,13 @@ def walk_forward_splits(
     test_bars: int,
     step_bars: int | None = None,
     min_train_bars: int | None = None,
+    max_folds: int | None = None,
 ):
     """
     Generates (train_start, train_end, test_start, test_end) in bar indices.
     - train is [train_start, train_end] inclusive
     - test  is [test_start, test_end] inclusive
+    - max_folds: Maximum number of folds to generate. If None, generates all possible folds.
     """
     if step_bars is None:
         step_bars = test_bars
@@ -31,6 +33,10 @@ def walk_forward_splits(
             break
 
         splits.append((train_start, train_end, test_start, test_end))
+        
+        # Stop if we've reached max_folds
+        if max_folds is not None and len(splits) >= max_folds:
+            break
 
         # move forward
         train_end = train_end + step_bars

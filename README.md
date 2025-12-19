@@ -147,6 +147,7 @@ TRAIN_BARS=2500
 TEST_BARS=500
 STEP_BARS=
 EMBARGO=
+MAX_FOLDS=
 
 # ============================================
 # Trades / Labeling
@@ -217,6 +218,7 @@ Para una ejecución rápida de prueba, puedes usar estos valores reducidos en tu
 TRAIN_BARS=1000
 TEST_BARS=200
 STEP_BARS=200
+MAX_FOLDS=10
 N_PATHS=50
 N_STEPS=500
 BURNIN=100

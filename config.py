@@ -37,6 +37,7 @@ class AppConfig(BaseSettings):
     test_bars: int = Field(500, ge=50)
     step_bars: Optional[int] = Field(None, ge=1, description="If None, defaults to test_bars inside code")
     embargo: Optional[int] = Field(None, ge=0, description="If None, defaults to H")
+    max_folds: Optional[int] = Field(None, ge=1, description="Maximum number of folds to process. If None, processes all folds")
 
     # -----------------------
     # Trades / labeling

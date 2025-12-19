@@ -52,6 +52,7 @@ def run_pipeline_walkforward(
     test_bars: int = 500,
     step_bars: int | None = None,
     embargo: int | None = None,
+    max_folds: int | None = None,
 
     # synthetic usage
     rho_max: float = 2.0,      # max ratio synthetic:real trades in train (cap)
@@ -105,8 +106,8 @@ def run_pipeline_walkforward(
     logger.info(f"Generated {len(real_trades_all)} real trades")
 
     # 3) Walk-forward splits
-    logger.info(f"Computing walk-forward splits (train_bars={train_bars}, test_bars={test_bars}, step_bars={step_bars})")
-    splits = walk_forward_splits(n_bars=n_bars, train_bars=train_bars, test_bars=test_bars, step_bars=step_bars)
+    logger.info(f"Computing walk-forward splits (train_bars={train_bars}, test_bars={test_bars}, step_bars={step_bars}, max_folds={max_folds})")
+    splits = walk_forward_splits(n_bars=n_bars, train_bars=train_bars, test_bars=test_bars, step_bars=step_bars, max_folds=max_folds)
     logger.info(f"Created {len(splits)} walk-forward folds")
 
     fold_results = []
@@ -277,6 +278,7 @@ def main(cfg: AppConfig):
         test_bars=cfg.test_bars,
         step_bars=cfg.step_bars,
         embargo=cfg.embargo,
+        max_folds=cfg.max_folds,
 
         # trades
         H=cfg.H,
