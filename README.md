@@ -124,6 +124,78 @@ Entrena un clasificador supervisado (baseline con Gradient Boosting) y evalúa e
 pip install numpy pandas scikit-learn scipy pydantic pydantic-settings ta
 ```
 
+### Configuración
+
+El proyecto requiere un archivo `.env` en la raíz del proyecto para configurar todos los parámetros del pipeline. El módulo `config.py` utiliza **Pydantic Settings** para cargar estos valores desde variables de entorno.
+
+**Es necesario crear un archivo `.env` antes de ejecutar el pipeline.** A continuación se muestra un ejemplo con todos los parámetros esperados:
+
+```env
+# ============================================
+# Data I/O
+# ============================================
+HISTORICAL_CSV=data/archivo_con_tus_datos.csv
+TIME_COL=time            # nombre de la columna con fecha de tu dataset de precios
+PRICE_COL=close_price    # nombre de la columna del precio que quieres modelar
+PARSE_DATES=true
+TIMEZONE=
+
+# ============================================
+# Walk-forward
+# ============================================
+TRAIN_BARS=2500
+TEST_BARS=500
+STEP_BARS=
+EMBARGO=
+
+# ============================================
+# Trades / Labeling
+# ============================================
+H=50
+TP_MULT=1.5
+SL_MULT=1.0
+FAST_MA_PERIOD=10
+SLOW_MA_PERIOD=30
+METHOD=atr
+PAST_BARS=50
+SIDE=long
+
+# ============================================
+# State / Nonparametric Estimator
+# ============================================
+VOL_WINDOW=60
+ALPHA=
+WARMUP=
+H_MU=0.2
+H_SIGMA=0.2
+
+# ============================================
+# Simulation
+# ============================================
+N_PATHS=500
+N_STEPS=2000
+DT=1.0
+BURNIN=300
+SEED=123
+
+# ============================================
+# Synthetic Usage Control
+# ============================================
+RHO_MAX=2.0
+
+# ============================================
+# Outputs
+# ============================================
+OUT_SUMMARY_CSV=walkforward_summary.csv         # aquí debe ir la ruta completa de salida de resultados, como en la siguiente
+OUT_FULL_JSON=walkforward_full_results.json
+```
+
+**Notas importantes:**
+- Los valores vacíos (`=`) utilizan los valores por defecto definidos en `config.py`.
+- `HISTORICAL_CSV` es obligatorio (no tiene valor por defecto).
+- Los parámetros opcionales pueden omitirse o dejarse vacíos para usar sus valores por defecto.
+- Para más detalles sobre cada parámetro, consulta la documentación en `config.py`.
+
 ### Ejecución
 
 ```bash
