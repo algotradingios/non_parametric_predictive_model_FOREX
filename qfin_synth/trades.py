@@ -14,6 +14,8 @@ def triple_barrier_labels(
     sl_mult: float = 1.0,
     method: str = "atr",
     past_bars: int = 50,
+    high_prices: pd.Series | None = None,
+    low_prices: pd.Series | None = None,
 ) -> tuple[int, int, float]:
     """
     Returns: (label, exit_idx, exit_rt)
@@ -21,24 +23,43 @@ def triple_barrier_labels(
       label = -1  -> SL touched first
       label =  0  -> horizon reached first
     exit_rt is an ABSOLUTE price difference (prices[t] - p0).
+    
+    Args:
+        prices: Close prices series
+        entry_idx: Entry index
+        H: Horizon (bars)
+        tp_mult: Take profit multiplier
+        sl_mult: Stop loss multiplier
+        method: "atr" or "std"
+        past_bars: Window for volatility estimation
+        high_prices: Optional high prices series (for ATR calculation)
+        low_prices: Optional low prices series (for ATR calculation)
     """
     end = min(entry_idx + H, len(prices) - 1)
     p0 = prices.iloc[entry_idx]
 
     # Local volatility estimation
+    # Use proper ATR calculation when high/low are available
     if entry_idx >= past_bars:
-        atr = ta.atr(prices, window=past_bars)
-        std = ta.stddev(prices, window=past_bars)
-        local_vol = atr.iloc[entry_idx] if method == "atr" else std.iloc[entry_idx] if method == "std" else None
+        window = past_bars
     else:
-        # Use all available bars up to entry
-        w = max(entry_idx - 1, 2)
-        atr = ta.atr(prices, window=w)
-        std = ta.stddev(prices, window=w)
-        local_vol = atr.iloc[entry_idx] if method == "atr" else std.iloc[entry_idx] if method == "std" else None
-
-    if local_vol is None:
-        raise ValueError(f"Invalid method: {method}")
+        window = max(entry_idx - 1, 2)
+    
+    # Calculate ATR using ta library - need data up to entry_idx
+    # ATR needs at least 'window' bars of data
+    start_idx = max(0, entry_idx - window + 1)
+    atr_indicator = ta.volatility.AverageTrueRange(
+        high=high_prices.iloc[start_idx:entry_idx + 1],
+        low=low_prices.iloc[start_idx:entry_idx + 1],
+        close=prices.iloc[start_idx:entry_idx + 1],
+        window=window
+    )
+    atr_values = atr_indicator.average_true_range()
+    local_vol = atr_values.iloc[-1] if len(atr_values) > 0 and not pd.isna(atr_values.iloc[-1]) else None
+    
+    if local_vol is None or np.isnan(local_vol) or local_vol <= 0:
+        # Fallback to std if ATR calculation fails
+        local_vol = prices.iloc[:entry_idx + 1].rolling(window=window).std().iloc[-1]
 
     # TP/SL in absolute price units (pips-style)
     tp = round(tp_mult * local_vol, 5)
@@ -52,6 +73,7 @@ def triple_barrier_labels(
             return -1, t, rt
 
     end_rt = prices.iloc[end] - p0
+
     return 0, end, end_rt
 
 
@@ -65,8 +87,8 @@ def ma_cross_entries(
       long_entries  (Series of 0/1) — entry at t when signal occurred at t-1 (look-ahead avoided)
       short_entries (Series of 0/1)
     """
-    fast_ema = ta.ema(price, window=fast_ma_period)
-    slow_ema = ta.ema(price, window=slow_ma_period)
+    fast_ema = ta.trend.EMAIndicator(price, window=fast_ma_period).ema_indicator()
+    slow_ema = ta.trend.EMAIndicator(price, window=slow_ma_period).ema_indicator()
 
     rel_pos = (fast_ema > slow_ema).astype(int)
 
@@ -90,18 +112,30 @@ def generate_trades(
     method: str = "atr",
     past_bars: int = 50,
     price_col: str = "close_price",
+    high_col: str | None = None,
+    low_col: str | None = None,
     side: str = "long",
 ) -> list[dict]:
     """
     Replicates your current logic.
 
     price_df: DataFrame with a datetime index and a column price_col ('close_price').
+              Optionally includes high_col and low_col for proper ATR calculation.
     side: currently only 'long' is implemented to match your code. ('short' can be added.)
     """
     if price_col not in price_df.columns:
         raise ValueError(f"price_df must include column '{price_col}'")
 
     prices = price_df[price_col].astype(float)
+    
+    # Extract high and low prices if available
+    high_prices = None
+    low_prices = None
+    if high_col and high_col in price_df.columns:
+        high_prices = price_df[high_col].astype(float)
+    if low_col and low_col in price_df.columns:
+        low_prices = price_df[low_col].astype(float)
+    
     long_entries, short_entries = ma_cross_entries(prices, fast_ma_period=fast_ma_period, slow_ma_period=slow_ma_period)
 
     trades: list[dict] = []
@@ -125,6 +159,8 @@ def generate_trades(
             sl_mult=sl_mult,
             method=method,
             past_bars=past_bars,
+            high_prices=high_prices,
+            low_prices=low_prices,
         )
 
         feat = {

@@ -54,13 +54,28 @@ def run_pipeline_walkforward(
     prices = df_hist[price_col].astype(float)
     n_bars = len(prices)
 
+    # Detect high/low columns if available (check common column name patterns)
+    high_col = 'bid_price_high'
+    low_col = 'bid_price_low'
+    
+    # Prepare price_df with available columns
+    price_df_cols = {price_col: "close_price"}
+    if high_col:
+        price_df_cols[high_col] = "high_price"
+    if low_col:
+        price_df_cols[low_col] = "low_price"
+    
+    price_df = df_hist[list(price_df_cols.keys())].rename(columns=price_df_cols)
+
     # 2) Precompute REAL trades once on full series (no leakage yet; we will filter per fold)
     real_trades_list = generate_trades(
-        price_df=df_hist[[price_col]].rename(columns={price_col: "close_price"}),
+        price_df=price_df,
         H=H, tp_mult=tp_mult, sl_mult=sl_mult,
         fast_ma_period=fast_ma_period, slow_ma_period=slow_ma_period,
         method=method, past_bars=past_bars,
         price_col="close_price",
+        high_col="high_price" if high_col else None,
+        low_col="low_price" if low_col else None,
         side="long",
     )
     real_trades_all = pd.DataFrame(real_trades_list)
