@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from scipy.stats import ks_2samp
+from tqdm import tqdm
 
 def _acf(x: np.ndarray, max_lag: int = 20) -> np.ndarray:
     x = np.asarray(x, dtype=float)
@@ -39,7 +40,8 @@ def validate_simulator(
     # Synthetic returns pooled across paths
     synth_returns = []
     synth_drawdowns = []
-    for _, g in synth_prices_df.groupby(path_col):
+    path_groups = list(synth_prices_df.groupby(path_col))
+    for _, g in tqdm(path_groups, desc="Validating paths", leave=False):
         p = g[price_col_synth].astype(float).to_numpy()
         rr = np.diff(np.log(p))
         synth_returns.append(rr)

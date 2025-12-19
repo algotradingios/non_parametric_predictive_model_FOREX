@@ -1,6 +1,8 @@
 # pipeline_main.py (walk-forward version)
+import logging
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 from config import AppConfig
 
 from qfin_synth.state import compute_basic_state
@@ -10,6 +12,14 @@ from qfin_synth.trades import generate_trades, generate_trades_from_paths
 from qfin_synth.models import train_classifier
 from qfin_synth.walkforward import walk_forward_splits, filter_trades_for_fold
 from qfin_synth.validation import validate_simulator
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 
 def run_pipeline_walkforward(
@@ -50,24 +60,27 @@ def run_pipeline_walkforward(
         embargo = H  # sensible default given labeling horizon
 
     # 1) Load prices
+    logger.info(f"Loading historical data from {historical_csv}")
     df_hist = pd.read_csv(historical_csv, index_col=time_col, parse_dates=True).sort_index()
     prices = df_hist[price_col].astype(float)
     n_bars = len(prices)
+    logger.info(f"Loaded {n_bars} price bars from {df_hist.index[0]} to {df_hist.index[-1]}")
 
-    # Detect high/low columns if available (check common column name patterns)
-    high_col = 'bid_price_high'
-    low_col = 'bid_price_low'
+    # Detect high/low columns if available
+    high_col = 'bid_price_high' if 'bid_price_high' in df_hist.columns else None
+    low_col = 'bid_price_low' if 'bid_price_low' in df_hist.columns else None
     
     # Prepare price_df with available columns
     price_df_cols = {price_col: "close_price"}
-    if high_col:
+    if high_col and high_col in df_hist.columns:
         price_df_cols[high_col] = "high_price"
-    if low_col:
+    if low_col and low_col in df_hist.columns:
         price_df_cols[low_col] = "low_price"
     
     price_df = df_hist[list(price_df_cols.keys())].rename(columns=price_df_cols)
 
     # 2) Precompute REAL trades once on full series (no leakage yet; we will filter per fold)
+    logger.info("Generating real trades from historical data...")
     real_trades_list = generate_trades(
         price_df=price_df,
         H=H, tp_mult=tp_mult, sl_mult=sl_mult,
@@ -81,13 +94,17 @@ def run_pipeline_walkforward(
     real_trades_all = pd.DataFrame(real_trades_list)
     if len(real_trades_all) == 0:
         raise ValueError("No real trades generated. Check strategy parameters and data.")
+    logger.info(f"Generated {len(real_trades_all)} real trades")
 
     # 3) Walk-forward splits
+    logger.info(f"Computing walk-forward splits (train_bars={train_bars}, test_bars={test_bars}, step_bars={step_bars})")
     splits = walk_forward_splits(n_bars=n_bars, train_bars=train_bars, test_bars=test_bars, step_bars=step_bars)
+    logger.info(f"Created {len(splits)} walk-forward folds")
 
     fold_results = []
 
-    for fold, (tr0, tr1, te0, te1) in enumerate(splits, start=1):
+    for fold, (tr0, tr1, te0, te1) in enumerate(tqdm(splits, desc="Processing folds"), start=1):
+        logger.info(f"Fold {fold}/{len(splits)}: Train [{tr0}:{tr1}], Test [{te0}:{te1}]")
         # 3a) Select train/test price segments
         prices_train = prices.iloc[tr0:tr1+1]
         prices_test = prices.iloc[te0:te1+1]
@@ -109,13 +126,17 @@ def run_pipeline_walkforward(
 
         if len(train_real) < 50 or len(test_real) < 20:
             # Fold too thin; skip or relax parameters
+            logger.warning(f"Fold {fold} skipped: Too few trades (train={len(train_real)}, test={len(test_real)})")
             fold_results.append({
                 "fold": fold, "train_range": (tr0,tr1), "test_range": (te0,te1),
                 "skipped": True, "reason": "Too few trades in train/test after purging."
             })
             continue
 
+        logger.info(f"Fold {fold}: {len(train_real)} train trades, {len(test_real)} test trades")
+
         # 4) Fit mu/sigma using ONLY training prices
+        logger.info(f"Fold {fold}: Computing state and fitting non-parametric estimator...")
         df_for_state = pd.DataFrame({
             "time": prices_train.index,
             "price": prices_train.values,
@@ -125,8 +146,10 @@ def run_pipeline_walkforward(
             vol_window=vol_window, alpha=alpha, warmup=warmup
         )
         est = MuSigmaNonParam(h_mu=h_mu, h_sigma=h_sigma).fit(X, y)
+        logger.info(f"Fold {fold}: Fitted estimator on {len(X)} training samples")
 
         # 5) Simulate synthetic paths (train-only)
+        logger.info(f"Fold {fold}: Simulating {n_paths} synthetic paths ({n_steps} steps each)...")
         synth_prices = simulate_paths(
             est=est,
             start_price=float(prices_train.iloc[-1]),
@@ -139,7 +162,10 @@ def run_pipeline_walkforward(
             seed=123 + fold,
         )
 
+        logger.info(f"Fold {fold}: Generated {len(synth_prices) // n_steps} synthetic paths")
+
         # 6) Validate simulator BEFORE using synthetics
+        logger.info(f"Fold {fold}: Validating simulator...")
         sim_diag = validate_simulator(
             real_prices=prices_train,
             synth_prices_df=synth_prices,
@@ -152,8 +178,12 @@ def run_pipeline_walkforward(
         # 7) Generate synthetic trades only if simulator passes
         synth_trades = pd.DataFrame()
         use_synth = bool(sim_diag["simulator_ok"])
+        logger.info(f"Fold {fold}: Simulator validation: {'PASSED' if use_synth else 'FAILED'} "
+                   f"(KS ret={sim_diag.get('ks_ret_stat', 'N/A'):.3f}, "
+                   f"KS RV={sim_diag.get('ks_rv_stat', 'N/A'):.3f})")
 
         if use_synth:
+            logger.info(f"Fold {fold}: Generating synthetic trades...")
             synth_trades = generate_trades_from_paths(
                 synth_prices,
                 time_col="t",
@@ -173,9 +203,12 @@ def run_pipeline_walkforward(
                 # Cap synthetic volume to rho_max * real trades (avoid dominating)
                 cap = int(rho_max * len(train_real))
                 if len(synth_trades) > cap:
+                    logger.info(f"Fold {fold}: Capping synthetic trades from {len(synth_trades)} to {cap}")
                     synth_trades = synth_trades.sample(n=cap, random_state=42)
+            logger.info(f"Fold {fold}: Generated {len(synth_trades)} synthetic trades")
 
         # 8) Train classifier on train_real (+ optional synth)
+        logger.info(f"Fold {fold}: Training classifier ({len(train_df)} samples)...")
         train_df = pd.concat([train_real, synth_trades], ignore_index=True) if use_synth else train_real.copy()
         train_df = train_df.rename(columns={"label_bin": "label"})
         test_df = test_real.rename(columns={"label_bin": "label"})
@@ -188,6 +221,7 @@ def run_pipeline_walkforward(
         )
 
         # 9) True walk-forward evaluation: predict on test_df
+        logger.info(f"Fold {fold}: Evaluating on test set ({len(test_df)} samples)...")
         X_test = test_df[["mom20", "vol20", "ma_ratio", "hold_bars", "is_synth"]].to_numpy(dtype=float)
         y_test = test_df["label"].astype(int).to_numpy()
         p = clf.predict_proba(X_test)[:, 1]
@@ -201,6 +235,8 @@ def run_pipeline_walkforward(
             "f1_test": float(f1_score(y_test, yhat)),
             "mcc_test": float(matthews_corrcoef(y_test, yhat)),
         }
+        logger.info(f"Fold {fold}: Test metrics - AUC={fold_eval['auc_test']:.4f}, "
+                   f"F1={fold_eval['f1_test']:.4f}, MCC={fold_eval['mcc_test']:.4f}")
 
         fold_results.append({
             "fold": fold,
@@ -220,6 +256,9 @@ def run_pipeline_walkforward(
 
 
 def main(cfg: AppConfig):
+    logger.info("=" * 80)
+    logger.info("Starting pipeline execution")
+    logger.info("=" * 80)
     results = run_pipeline_walkforward(
         historical_csv=cfg.historical_csv,
         time_col=cfg.time_col,
@@ -280,13 +319,18 @@ def main(cfg: AppConfig):
         })
 
     summary_df = pd.DataFrame(rows)
+    logger.info(f"Saving results to {cfg.out_summary_csv} and {cfg.out_full_json}")
     summary_df.to_csv(cfg.out_summary_csv, index=False)
 
     with open(cfg.out_full_json, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
+    logger.info("=" * 80)
+    logger.info("Pipeline execution completed successfully")
+    logger.info("=" * 80)
     print(f"Saved: {cfg.out_summary_csv}, {cfg.out_full_json}")
     if len(summary_df):
+        logger.info("Summary statistics:")
         print(summary_df[["auc_test", "f1_test", "mcc_test"]].mean().to_string())
 
 

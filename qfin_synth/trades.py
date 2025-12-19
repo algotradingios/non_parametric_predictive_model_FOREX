@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import ta
+from tqdm import tqdm
 
 
 def triple_barrier_labels(
@@ -39,27 +40,35 @@ def triple_barrier_labels(
     p0 = prices.iloc[entry_idx]
 
     # Local volatility estimation
-    # Use proper ATR calculation when high/low are available
     if entry_idx >= past_bars:
         window = past_bars
     else:
         window = max(entry_idx - 1, 2)
     
-    # Calculate ATR using ta library - need data up to entry_idx
-    # ATR needs at least 'window' bars of data
-    start_idx = max(0, entry_idx - window + 1)
-    atr_indicator = ta.volatility.AverageTrueRange(
-        high=high_prices.iloc[start_idx:entry_idx + 1],
-        low=low_prices.iloc[start_idx:entry_idx + 1],
-        close=prices.iloc[start_idx:entry_idx + 1],
-        window=window
-    )
-    atr_values = atr_indicator.average_true_range()
-    local_vol = atr_values.iloc[-1] if len(atr_values) > 0 and not pd.isna(atr_values.iloc[-1]) else None
+    # Use proper ATR calculation when high/low are available
+    if method == "atr" and high_prices is not None and low_prices is not None:
+        # Calculate ATR using ta library - need data up to entry_idx
+        # ATR needs at least 'window' bars of data
+        start_idx = max(0, entry_idx - window + 1)
+        atr_indicator = ta.volatility.AverageTrueRange(
+            high=high_prices.iloc[start_idx:entry_idx + 1],
+            low=low_prices.iloc[start_idx:entry_idx + 1],
+            close=prices.iloc[start_idx:entry_idx + 1],
+            window=window
+        )
+        atr_values = atr_indicator.average_true_range()
+        local_vol = atr_values.iloc[-1] if len(atr_values) > 0 and not pd.isna(atr_values.iloc[-1]) else None
+        
+        if local_vol is None or np.isnan(local_vol) or local_vol <= 0:
+            # Fallback to std if ATR calculation fails
+            local_vol = prices.iloc[:entry_idx + 1].rolling(window=window).std().iloc[-1]
+    else:
+        # Fallback: use rolling standard deviation
+        std = prices.rolling(window=window).std()
+        local_vol = std.iloc[entry_idx] if entry_idx < len(std) else None
     
-    if local_vol is None or np.isnan(local_vol) or local_vol <= 0:
-        # Fallback to std if ATR calculation fails
-        local_vol = prices.iloc[:entry_idx + 1].rolling(window=window).std().iloc[-1]
+    if local_vol is None or np.isnan(local_vol):
+        raise ValueError(f"Could not calculate local volatility at entry_idx={entry_idx}")
 
     # TP/SL in absolute price units (pips-style)
     tp = round(tp_mult * local_vol, 5)
@@ -147,7 +156,7 @@ def generate_trades(
     long_entry_mask = long_entries == 1
     long_entry_positions = [i for i, val in enumerate(long_entry_mask) if bool(val)]
 
-    for e in long_entry_positions:
+    for e in tqdm(long_entry_positions, desc="Generating trades", leave=False):
         if e >= len(prices) - 2:
             continue
 
@@ -170,8 +179,8 @@ def generate_trades(
             "price_in": float(prices.iloc[e]),
             "price_out": float(prices.iloc[exit_idx]),
             "ret_log": float(np.log(prices.iloc[exit_idx] / prices.iloc[e])),
-            "mom20": float(prices.pct_change().rolling(20).mean().iloc[e]),
-            "vol20": float(prices.pct_change().rolling(20).std().iloc[e]),
+            "mom20": float(prices.pct_change(fill_method=None).rolling(20).mean().iloc[e]),
+            "vol20": float(prices.pct_change(fill_method=None).rolling(20).std().iloc[e]),
             "ma_ratio": float(
                 (prices.rolling(fast_ma_period).mean().iloc[e]) /
                 (prices.rolling(slow_ma_period).mean().iloc[e] + 1e-12)
@@ -205,7 +214,8 @@ def generate_trades_from_paths(
         raise ValueError(f"paths_df must include '{path_col}' and '{price_col_in}' columns")
 
     rows = []
-    for pid, g in paths_df.groupby(path_col):
+    path_groups = list(paths_df.groupby(path_col))
+    for pid, g in tqdm(path_groups, desc="Processing synthetic paths", leave=False):
         g2 = g.sort_values(time_col).reset_index(drop=True)
         # Use an integer index as a surrogate; your logic uses iloc anyway
         df_price = pd.DataFrame({out_price_col: g2[price_col_in].astype(float).to_numpy()})

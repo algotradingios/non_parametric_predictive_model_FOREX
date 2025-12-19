@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 def simulate_paths(
     est,  # MuSigmaNonParam
@@ -32,7 +33,7 @@ def simulate_paths(
     total = n_steps + burnin
 
     out_all = []
-    for p in range(n_paths):
+    for p in tqdm(range(n_paths), desc="Simulating paths", leave=False):
         P = np.empty(total, dtype=float)
         r = np.empty(total, dtype=float)
         lvol = np.empty(total, dtype=float)
