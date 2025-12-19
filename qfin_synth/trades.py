@@ -1,0 +1,184 @@
+# qfin_synth/trades.py
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import ta
+
+
+def triple_barrier_labels(
+    prices: pd.Series,
+    entry_idx: int,
+    H: int = 20,
+    tp_mult: float = 1.5,
+    sl_mult: float = 1.0,
+    method: str = "atr",
+    past_bars: int = 50,
+) -> tuple[int, int, float]:
+    """
+    Returns: (label, exit_idx, exit_rt)
+      label =  1  -> TP touched first
+      label = -1  -> SL touched first
+      label =  0  -> horizon reached first
+    exit_rt is an ABSOLUTE price difference (prices[t] - p0).
+    """
+    end = min(entry_idx + H, len(prices) - 1)
+    p0 = prices.iloc[entry_idx]
+
+    # Local volatility estimation
+    if entry_idx >= past_bars:
+        atr = ta.atr(prices, window=past_bars)
+        std = ta.stddev(prices, window=past_bars)
+        local_vol = atr.iloc[entry_idx] if method == "atr" else std.iloc[entry_idx] if method == "std" else None
+    else:
+        # Use all available bars up to entry
+        w = max(entry_idx - 1, 2)
+        atr = ta.atr(prices, window=w)
+        std = ta.stddev(prices, window=w)
+        local_vol = atr.iloc[entry_idx] if method == "atr" else std.iloc[entry_idx] if method == "std" else None
+
+    if local_vol is None:
+        raise ValueError(f"Invalid method: {method}")
+
+    # TP/SL in absolute price units (pips-style)
+    tp = round(tp_mult * local_vol, 5)
+    sl = round(sl_mult * local_vol, 5)
+
+    for t in range(entry_idx + 1, end + 1):
+        rt = prices.iloc[t] - p0
+        if rt >= tp:
+            return 1, t, rt
+        if rt <= -sl:
+            return -1, t, rt
+
+    end_rt = prices.iloc[end] - p0
+    return 0, end, end_rt
+
+
+def ma_cross_entries(
+    price: pd.Series,
+    fast_ma_period: int = 10,
+    slow_ma_period: int = 100,
+) -> tuple[pd.Series, pd.Series]:
+    """
+    Returns:
+      long_entries  (Series of 0/1) — entry at t when signal occurred at t-1 (look-ahead avoided)
+      short_entries (Series of 0/1)
+    """
+    fast_ema = ta.ema(price, window=fast_ma_period)
+    slow_ema = ta.ema(price, window=slow_ma_period)
+
+    rel_pos = (fast_ema > slow_ema).astype(int)
+
+    long_signal = np.where((rel_pos.shift(1) == 0) & (rel_pos == 1), 1, 0)
+    short_signal = np.where((rel_pos.shift(1) == 1) & (rel_pos == 0), 1, 0)
+
+    # IMPORTANT: shift(1) to execute after signal bar (avoid look-ahead)
+    long_entries = pd.Series(long_signal, index=price.index).shift(1)
+    short_entries = pd.Series(short_signal, index=price.index).shift(1)
+
+    return long_entries, short_entries
+
+
+def generate_trades(
+    price_df: pd.DataFrame,
+    H: int = 50,
+    tp_mult: float = 1.5,
+    sl_mult: float = 1.0,
+    fast_ma_period: int = 10,
+    slow_ma_period: int = 30,
+    method: str = "atr",
+    past_bars: int = 50,
+    price_col: str = "close_price",
+    side: str = "long",
+) -> list[dict]:
+    """
+    Replicates your current logic.
+
+    price_df: DataFrame with a datetime index and a column price_col ('close_price').
+    side: currently only 'long' is implemented to match your code. ('short' can be added.)
+    """
+    if price_col not in price_df.columns:
+        raise ValueError(f"price_df must include column '{price_col}'")
+
+    prices = price_df[price_col].astype(float)
+    long_entries, short_entries = ma_cross_entries(prices, fast_ma_period=fast_ma_period, slow_ma_period=slow_ma_period)
+
+    trades: list[dict] = []
+
+    if side not in {"long"}:
+        raise NotImplementedError("Only side='long' is implemented to replicate your current script.")
+
+    # positions where long_entries == 1
+    long_entry_mask = long_entries == 1
+    long_entry_positions = [i for i, val in enumerate(long_entry_mask) if bool(val)]
+
+    for e in long_entry_positions:
+        if e >= len(prices) - 2:
+            continue
+
+        label, exit_idx, exit_rt = triple_barrier_labels(
+            prices=prices,
+            entry_idx=e,
+            H=H,
+            tp_mult=tp_mult,
+            sl_mult=sl_mult,
+            method=method,
+            past_bars=past_bars,
+        )
+
+        feat = {
+            "entry_idx": int(e),
+            "exit_idx": int(exit_idx),
+            "hold_bars": int(exit_idx - e),
+            "price_in": float(prices.iloc[e]),
+            "price_out": float(prices.iloc[exit_idx]),
+            "ret_log": float(np.log(prices.iloc[exit_idx] / prices.iloc[e])),
+            "mom20": float(prices.pct_change().rolling(20).mean().iloc[e]),
+            "vol20": float(prices.pct_change().rolling(20).std().iloc[e]),
+            "ma_ratio": float(
+                (prices.rolling(fast_ma_period).mean().iloc[e]) /
+                (prices.rolling(slow_ma_period).mean().iloc[e] + 1e-12)
+            ),
+            "label": int(label),
+            "exit_rt_abs": float(exit_rt),  # NEW: keep the absolute return your barrier logic used
+            "side": "long",
+        }
+        trades.append(feat)
+
+    return trades
+
+
+def generate_trades_from_paths(
+    paths_df: pd.DataFrame,
+    time_col: str = "t",
+    path_col: str = "path",
+    price_col_in: str = "price",
+    out_price_col: str = "close_price",
+    **trade_kwargs,
+) -> pd.DataFrame:
+    """
+    Helper to apply generate_trades() to a multi-path synthetic DataFrame of the form:
+      columns: [path, t, price]
+    It converts each path group into the expected format (datetime index optional),
+    calls generate_trades, and returns a single trades DataFrame with 'path' attached.
+
+    trade_kwargs are passed to generate_trades (H, tp_mult, fast_ma_period, etc.)
+    """
+    if path_col not in paths_df.columns or price_col_in not in paths_df.columns:
+        raise ValueError(f"paths_df must include '{path_col}' and '{price_col_in}' columns")
+
+    rows = []
+    for pid, g in paths_df.groupby(path_col):
+        g2 = g.sort_values(time_col).reset_index(drop=True)
+        # Use an integer index as a surrogate; your logic uses iloc anyway
+        df_price = pd.DataFrame({out_price_col: g2[price_col_in].astype(float).to_numpy()})
+        # Give it an index (could be datetime if you have it; not required for iloc operations)
+        df_price.index = pd.RangeIndex(start=0, stop=len(df_price), step=1)
+
+        trades_list = generate_trades(df_price, price_col=out_price_col, **trade_kwargs)
+        for tr in trades_list:
+            tr["path"] = int(pid)
+            rows.append(tr)
+
+    return pd.DataFrame(rows)

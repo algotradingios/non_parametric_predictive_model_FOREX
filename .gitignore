@@ -1,0 +1,51 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor / OS files
+.vscode/
+*.swp
+.DS_Store
+
+# Environment variables
+.env
+.env.*
+!.env.example
+*.env
+
+# Data files and directories
+data/
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.feather
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+*.db
+*.sqlite
+*.sqlite3
+
+# Results directory
+results/
+*.log
