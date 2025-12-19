@@ -184,6 +184,12 @@ SEED=123
 RHO_MAX=2.0
 
 # ============================================
+# Fold Filtering Thresholds
+# ============================================
+MIN_TRAIN_TRADES=50
+MIN_TEST_TRADES=20
+
+# ============================================
 # Outputs
 # ============================================
 OUT_SUMMARY_CSV=walkforward_summary.csv         # aquí debe ir la ruta completa de salida de resultados, como en la siguiente
@@ -201,6 +207,24 @@ OUT_FULL_JSON=walkforward_full_results.json
 ```bash
 python pipeline_main.py
 ```
+
+### Ejecución rápida (test)
+
+Para una ejecución rápida de prueba, puedes usar estos valores reducidos en tu `.env`:
+
+```env
+# Valores reducidos para test rápido
+TRAIN_BARS=1000
+TEST_BARS=200
+STEP_BARS=200
+N_PATHS=50
+N_STEPS=500
+BURNIN=100
+MIN_TRAIN_TRADES=20
+MIN_TEST_TRADES=10
+```
+
+Esto reducirá significativamente el tiempo de ejecución mientras mantiene la funcionalidad del pipeline.
 
 ---
 

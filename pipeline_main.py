@@ -55,13 +55,21 @@ def run_pipeline_walkforward(
 
     # synthetic usage
     rho_max: float = 2.0,      # max ratio synthetic:real trades in train (cap)
+    
+    # fold filtering
+    min_train_trades: int = 50,
+    min_test_trades: int = 20,
 ):
     if embargo is None:
         embargo = H  # sensible default given labeling horizon
 
-    # 1) Load prices
+    # 1) Load prices (only 10% of the data)
     logger.info(f"Loading historical data from {historical_csv}")
-    df_hist = pd.read_csv(historical_csv, index_col=time_col, parse_dates=True).sort_index()
+    # First, count total rows to calculate 10%
+    total_rows = sum(1 for _ in open(historical_csv, 'r')) - 1  # -1 for header
+    rows_to_read = max(1, int(total_rows * 0.1))  # 10% of rows, at least 1
+    logger.info(f"Reading {rows_to_read} rows ({rows_to_read/total_rows*100:.1f}%) out of {total_rows} total rows")
+    df_hist = pd.read_csv(historical_csv, index_col=time_col, parse_dates=True, nrows=rows_to_read).sort_index()
     prices = df_hist[price_col].astype(float)
     n_bars = len(prices)
     logger.info(f"Loaded {n_bars} price bars from {df_hist.index[0]} to {df_hist.index[-1]}")
@@ -124,12 +132,12 @@ def run_pipeline_walkforward(
         train_real["is_synth"] = 0
         test_real["is_synth"] = 0
 
-        if len(train_real) < 50 or len(test_real) < 20:
+        if len(train_real) < min_train_trades or len(test_real) < min_test_trades:
             # Fold too thin; skip or relax parameters
-            logger.warning(f"Fold {fold} skipped: Too few trades (train={len(train_real)}, test={len(test_real)})")
+            logger.warning(f"Fold {fold} skipped: Too few trades (train={len(train_real)}<{min_train_trades}, test={len(test_real)}<{min_test_trades})")
             fold_results.append({
                 "fold": fold, "train_range": (tr0,tr1), "test_range": (te0,te1),
-                "skipped": True, "reason": "Too few trades in train/test after purging."
+                "skipped": True, "reason": f"Too few trades in train/test after purging (train={len(train_real)}, test={len(test_real)})"
             })
             continue
 
@@ -208,10 +216,10 @@ def run_pipeline_walkforward(
             logger.info(f"Fold {fold}: Generated {len(synth_trades)} synthetic trades")
 
         # 8) Train classifier on train_real (+ optional synth)
-        logger.info(f"Fold {fold}: Training classifier ({len(train_df)} samples)...")
         train_df = pd.concat([train_real, synth_trades], ignore_index=True) if use_synth else train_real.copy()
         train_df = train_df.rename(columns={"label_bin": "label"})
         test_df = test_real.rename(columns={"label_bin": "label"})
+        logger.info(f"Fold {fold}: Training classifier ({len(train_df)} samples)...")
 
         clf, metrics = train_classifier(
             train_df,
@@ -292,6 +300,10 @@ def main(cfg: AppConfig):
 
         # synthetic usage
         rho_max=cfg.rho_max,
+        
+        # fold filtering
+        min_train_trades=cfg.min_train_trades,
+        min_test_trades=cfg.min_test_trades,
     )
 
     # Summarize

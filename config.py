@@ -72,6 +72,12 @@ class AppConfig(BaseSettings):
     # Synthetic usage control
     # -----------------------
     rho_max: float = Field(2.0, gt=0, description="Cap synthetic trades to rho_max * real trades in each fold")
+    
+    # -----------------------
+    # Fold filtering thresholds
+    # -----------------------
+    min_train_trades: int = Field(50, ge=1, description="Minimum number of train trades required to process a fold")
+    min_test_trades: int = Field(20, ge=1, description="Minimum number of test trades required to process a fold")
 
     # -----------------------
     # Outputs
