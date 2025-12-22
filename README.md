@@ -161,6 +161,7 @@ METHOD=atr
 PAST_BARS=50
 SIDE=long
 FEATURE_WINDOW=20
+FEATURE_COLS=mom20,vol20,ma_ratio
 
 # ============================================
 # State / Nonparametric Estimator

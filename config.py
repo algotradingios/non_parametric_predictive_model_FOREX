@@ -1,8 +1,8 @@
 # config.py
 from __future__ import annotations
 
-from typing import Optional, Literal
-from pydantic import Field
+from typing import Optional, Literal, List
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -48,6 +48,13 @@ class AppConfig(BaseSettings):
     past_bars: int = Field(50, ge=2)
     side: Literal["long"] = Field("long")  # keep aligned with your current implementation
     feature_window: int = Field(20, ge=1, description="Rolling window period for mom20 and vol20 features")
+    feature_cols: str = Field("mom20,vol20,ma_ratio", description="Comma-separated list of feature columns to use for classification")
+    
+    def get_feature_cols(self) -> List[str]:
+        """Get feature columns as a list."""
+        if isinstance(self.feature_cols, str):
+            return [col.strip() for col in self.feature_cols.split(',') if col.strip()]
+        return self.feature_cols if isinstance(self.feature_cols, list) else [self.feature_cols]
 
     # -----------------------
     # State / nonparametric estimator

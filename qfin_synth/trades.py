@@ -125,6 +125,7 @@ def generate_trades(
     low_col: str | None = None,
     side: str = "long",
     feature_window: int = 20,
+    feature_cols: list[str] | None = None,
 ) -> list[dict]:
     """
     Replicates your current logic.
@@ -193,19 +194,7 @@ def generate_trades(
         if pd.isna(price_in) or pd.isna(price_out):
             continue
         
-        # Compute rolling features with proper handling of insufficient history
-        # Note: pct_change[0] is always NaN (no previous value), so we use min_periods to handle this
-        pct_change = prices.pct_change(fill_method=None)
-        # Use min_periods=feature_window to require full window, but skip NaN values in calculation
-        # This ensures we get NaN only if there aren't enough valid values, not just because of one NaN
-        mom_val = pct_change.rolling(feature_window, min_periods=feature_window).mean().iloc[e] if e >= feature_window else np.nan
-        vol_val = pct_change.rolling(feature_window, min_periods=feature_window).std().iloc[e] if e >= feature_window else np.nan
-        
-        # MA ratio needs at least slow_ma_period bars
-        fast_ma_val = prices.rolling(fast_ma_period).mean().iloc[e] if e >= fast_ma_period - 1 else np.nan
-        slow_ma_val = prices.rolling(slow_ma_period).mean().iloc[e] if e >= slow_ma_period - 1 else np.nan
-        ma_ratio_val = fast_ma_val / (slow_ma_val + 1e-12) if not (pd.isna(fast_ma_val) or pd.isna(slow_ma_val)) else np.nan
-        
+        # Initialize feature dictionary with basic trade information
         feat = {
             "entry_idx": int(e),
             "exit_idx": int(exit_idx),
@@ -213,13 +202,30 @@ def generate_trades(
             "price_in": float(price_in),
             "price_out": float(price_out),
             "ret_log": float(np.log(price_out / price_in)),
-            "mom20": float(mom_val) if not pd.isna(mom_val) else np.nan,
-            "vol20": float(vol_val) if not pd.isna(vol_val) else np.nan,
-            "ma_ratio": float(ma_ratio_val) if not pd.isna(ma_ratio_val) else np.nan,
             "label": int(label),
             "exit_rt_abs": float(exit_rt),
             "side": "long",
         }
+        
+        # Extract feature columns from price_df if specified
+        # We trust that feature_cols are already present in price_df
+        if feature_cols is not None:
+            for feat_col in feature_cols:
+                # Skip features that are already computed above or will be added later
+                if feat_col in ["hold_bars", "is_synth", "entry_idx", "exit_idx", "price_in", "price_out", "ret_log", "label", "exit_rt_abs", "side"]:
+                    continue
+                
+                # Extract feature from price_df if it exists
+                if feat_col in price_df.columns:
+                    feat_val = price_df[feat_col].iloc[e]
+                    # Convert to float, handling NaN
+                    if pd.isna(feat_val):
+                        feat[feat_col] = np.nan
+                    else:
+                        feat[feat_col] = float(feat_val)
+                else:
+                    # Feature not found in price_df - set to NaN
+                    feat[feat_col] = np.nan
         # breakpoint()
         trades.append(feat)
 
@@ -247,12 +253,49 @@ def generate_trades_from_paths(
 
     rows = []
     path_groups = list(paths_df.groupby(path_col))
+    
+    # Extract feature_cols and other parameters from trade_kwargs
+    feature_cols = trade_kwargs.get('feature_cols', None)
+    feature_window = trade_kwargs.get('feature_window', 20)
+    fast_ma_period = trade_kwargs.get('fast_ma_period', 10)
+    slow_ma_period = trade_kwargs.get('slow_ma_period', 30)
+    
     for pid, g in tqdm(path_groups, desc="Processing synthetic paths", leave=False):
         g2 = g.sort_values(time_col).reset_index(drop=True)
         # Use an integer index as a surrogate; your logic uses iloc anyway
         df_price = pd.DataFrame({out_price_col: g2[price_col_in].astype(float).to_numpy()})
         # Give it an index (could be datetime if you have it; not required for iloc operations)
         df_price.index = pd.RangeIndex(start=0, stop=len(df_price), step=1)
+        
+        # Compute feature columns that are requested but not already in the data
+        # For synthetic paths, we typically need to compute features since they're generated
+        if feature_cols is not None:
+            prices_series = df_price[out_price_col].astype(float)
+            # Handle missing values
+            n_missing_before = prices_series.isna().sum()
+            if n_missing_before > 0:
+                prices_series = prices_series.ffill().bfill()
+            
+            # Only compute features that are requested AND not already present
+            for feat_col in feature_cols:
+                # Skip if already in df_price
+                if feat_col in df_price.columns:
+                    continue
+                # Skip features computed elsewhere
+                if feat_col in ["hold_bars", "is_synth"]:
+                    continue
+                
+                # Compute features that need to be calculated
+                pct_change = prices_series.pct_change(fill_method=None)
+                if feat_col == "mom20" or feat_col == "mom":
+                    df_price["mom20"] = pct_change.rolling(feature_window, min_periods=feature_window).mean()
+                elif feat_col == "vol20" or feat_col == "vol":
+                    df_price["vol20"] = pct_change.rolling(feature_window, min_periods=feature_window).std()
+                elif feat_col == "ma_ratio":
+                    fast_ma = prices_series.rolling(fast_ma_period).mean()
+                    slow_ma = prices_series.rolling(slow_ma_period).mean()
+                    df_price["ma_ratio"] = fast_ma / (slow_ma + 1e-12)
+                # Other features that need computation can be added here
 
         trades_list = generate_trades(df_price, price_col=out_price_col, **trade_kwargs)
         for tr in trades_list:

@@ -58,6 +58,9 @@ def run_pipeline_walkforward(
     # fold filtering
     min_train_trades: int = 50,
     min_test_trades: int = 20,
+    
+    # classifier features
+    feature_cols: list[str] = None,
 ):
     if embargo is None:
         embargo = H  # sensible default given labeling horizon
@@ -84,7 +87,46 @@ def run_pipeline_walkforward(
     if low_col and low_col in df_hist.columns:
         price_df_cols[low_col] = "low_price"
     
+    # Add feature columns from df_hist if they exist (like bid_tick_count)
+    if feature_cols is not None:
+        for feat_col in feature_cols:
+            # Skip features that are computed elsewhere (hold_bars, is_synth) or are price columns
+            if feat_col in ["hold_bars", "is_synth", "close_price", "high_price", "low_price"]:
+                continue
+            # If feature exists in original data, include it
+            if feat_col in df_hist.columns:
+                price_df_cols[feat_col] = feat_col
+    
     price_df = df_hist[list(price_df_cols.keys())].rename(columns=price_df_cols)
+    
+    # Compute feature columns that are requested but not already in the data
+    if feature_cols is not None:
+        prices_series = price_df["close_price"].astype(float)
+        # Handle missing values
+        n_missing_before = prices_series.isna().sum()
+        if n_missing_before > 0:
+            prices_series = prices_series.ffill().bfill()
+        
+        # Only compute features that are requested AND not already present
+        for feat_col in feature_cols:
+            # Skip if already in price_df (extracted from data)
+            if feat_col in price_df.columns:
+                continue
+            # Skip features computed elsewhere
+            if feat_col in ["hold_bars", "is_synth"]:
+                continue
+            
+            # Compute features that need to be calculated
+            pct_change = prices_series.pct_change(fill_method=None)
+            if feat_col == "mom20" or feat_col == "mom":
+                price_df["mom20"] = pct_change.rolling(feature_window, min_periods=feature_window).mean()
+            elif feat_col == "vol20" or feat_col == "vol":
+                price_df["vol20"] = pct_change.rolling(feature_window, min_periods=feature_window).std()
+            elif feat_col == "ma_ratio":
+                fast_ma = prices_series.rolling(fast_ma_period).mean()
+                slow_ma = prices_series.rolling(slow_ma_period).mean()
+                price_df["ma_ratio"] = fast_ma / (slow_ma + 1e-12)
+            # Other features that need computation can be added here
 
     # breakpoint()
 
@@ -100,6 +142,7 @@ def run_pipeline_walkforward(
         low_col="low_price" if low_col else None,
         side="long",
         feature_window=feature_window,
+        feature_cols=feature_cols,
     )
     real_trades_all = pd.DataFrame(real_trades_list)
     if len(real_trades_all) == 0:
@@ -131,14 +174,24 @@ def run_pipeline_walkforward(
         test_start=te0, test_end=te1,
         embargo=embargo,
     )
+    logger.info(f"Fold {fold}: After filtering by fold - train: {len(train_real)} trades, test: {len(test_real)} trades")
+    
     # Binary setup: drop label==0, map {1,-1}->{1,0}
     train_real = train_real[train_real["label"].isin([1, -1])].copy()
     test_real = test_real[test_real["label"].isin([1, -1])].copy()
+    logger.info(f"Fold {fold}: After filtering labels - train: {len(train_real)} trades, test: {len(test_real)} trades")
     
     # Remove trades with NaN features (insufficient history or missing price data)
-    feature_cols = ["mom20", "vol20", "ma_ratio"]
+    if len(train_real) > 0:
+        nan_counts_train = train_real[feature_cols].isna().sum()
+        logger.info(f"Fold {fold}: Train trades NaN counts: {nan_counts_train.to_dict()}")
+    if len(test_real) > 0:
+        nan_counts_test = test_real[feature_cols].isna().sum()
+        logger.info(f"Fold {fold}: Test trades NaN counts: {nan_counts_test.to_dict()}")
+    
     train_real = train_real.dropna(subset=feature_cols + ["price_in"]).copy()
     test_real = test_real.dropna(subset=feature_cols + ["price_in"]).copy()
+    logger.info(f"Fold {fold}: After dropna - train: {len(train_real)} trades, test: {len(test_real)} trades")
     
     train_real["label_bin"] = (train_real["label"] == 1).astype(int)
     test_real["label_bin"] = (test_real["label"] == 1).astype(int)
@@ -216,7 +269,7 @@ def run_pipeline_walkforward(
 
     if use_synth:
         logger.info(f"Fold {fold}: Generating synthetic trades...")
-        synth_trades = generate_trades_from_paths(synth_prices, feature_window=feature_window)
+        synth_trades = generate_trades_from_paths(synth_prices, feature_window=feature_window, feature_cols=feature_cols)
         if len(synth_trades) > 0:
             synth_trades = synth_trades[synth_trades["label"].isin([1, -1])].copy()
             synth_trades["label_bin"] = (synth_trades["label"] == 1).astype(int)
@@ -300,6 +353,7 @@ def main(cfg: AppConfig):
         method=cfg.method,
         past_bars=cfg.past_bars,
         feature_window=cfg.feature_window,
+        feature_cols=cfg.get_feature_cols(),
 
         # state / simulator
         vol_window=cfg.vol_window,
