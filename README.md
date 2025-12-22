@@ -57,7 +57,8 @@ project/
 │   ├── trades.py
 │   ├── validation.py
 │   ├── walkforward.py
-│   └── models.py
+│   ├── models.py
+│   └── tuning.py
 ```
 
 ---
@@ -100,6 +101,24 @@ Filtra trades según rangos temporales de entrenamiento y prueba, aplicando emba
 ### 4.8 `models.py` — Clasificador
 
 Entrena un clasificador supervisado (baseline con Gradient Boosting) y evalúa exclusivamente fuera de muestra.
+
+### 4.9 `tuning.py` — Optimización de hiperparámetros (bandwidths)
+
+Implementa una búsqueda en cuadrícula (grid search) para optimizar los anchos de banda `h_mu` y `h_sigma` del estimador no paramétrico. El módulo proporciona:
+
+- **`tune_bandwidths()`**: Función principal que realiza una búsqueda exhaustiva sobre combinaciones de `(h_mu, h_sigma)`.
+- **Validación rigurosa**: Para cada combinación de hiperparámetros:
+  - Ejecuta el pipeline completo **con sintéticos** y **sin sintéticos** para comparación.
+  - Valida la estabilidad del simulador mediante diagnósticos estadísticos.
+  - Calcula métricas fuera de muestra (AUC, F1, MCC) para ambos casos.
+  - Compara el rendimiento con y sin datos sintéticos para medir el impacto de la data augmentation.
+- **Ranking inteligente**: Ordena los candidatos según:
+  1. **Elegibilidad**: Solo considera combinaciones que pasan las validaciones de estabilidad y del simulador.
+  2. **Métrica objetivo**: Ordena por la métrica especificada (`mcc`, `auc`, o `f1`).
+  3. **Robustez**: Prefiere combinaciones con mayor media y menor desviación estándar (si `prefer_robust=True`).
+- **Progreso detallado**: Muestra el progreso de la búsqueda con información sobre cada combinación evaluada.
+
+**Uso**: El módulo se integra automáticamente en `pipeline_main.py` a través de la función `run_bandwidth_tuning()`, que ejecuta la búsqueda antes de la evaluación final con los mejores hiperparámetros encontrados.
 
 ---
 
@@ -161,14 +180,33 @@ El pipeline ejecuta las siguientes fases en orden secuencial:
 - **Preparación de datos**: Crea un DataFrame con precios de entrenamiento para `compute_basic_state()`.
 - **Validación de muestras**: Verifica que haya suficientes muestras válidas después del warmup (`WARMUP`). Si no, el fold se omite.
 
-### Fase 8: Ajuste del estimador no paramétrico
+### Fase 8: Optimización de hiperparámetros (bandwidths) — **NUEVO**
+
+- **Búsqueda en cuadrícula**: Antes de entrenar el estimador final, se ejecuta una búsqueda exhaustiva sobre combinaciones de `(h_mu, h_sigma)`:
+  - **Cuadrícula de búsqueda**: Por defecto prueba `h_mu ∈ [0.2, 0.3, 0.4]` y `h_sigma ∈ [0.4, 0.6, 0.8]` (configurable en `run_bandwidth_tuning()`).
+  - **Evaluación por combinación**: Para cada combinación `(h_mu, h_sigma)`:
+    - Ejecuta el pipeline completo **con sintéticos** (`rho_max > 0`).
+    - Ejecuta el pipeline completo **sin sintéticos** (`rho_max = 0`, `n_paths = 0`) para comparación.
+    - Valida la estabilidad del simulador y la calidad de los datos sintéticos.
+    - Calcula métricas fuera de muestra (AUC, F1, MCC) para ambos casos.
+  - **Ranking y selección**: Ordena los candidatos según:
+    1. Elegibilidad (deben pasar validaciones de estabilidad y simulador).
+    2. Métrica objetivo (por defecto MCC).
+    3. Robustez (prefiere mayor media y menor desviación estándar).
+  - **Selección del mejor**: Elige la combinación `(h_mu, h_sigma)` con mejor rendimiento validado.
+- **Guardado de resultados**: Guarda todos los resultados de la búsqueda en `bandwidth_tuning_results.csv` y los mejores hiperparámetros en `best_bandwidth.json`.
+- **Progreso visible**: Muestra el progreso de la búsqueda con información detallada sobre cada combinación evaluada.
+
+**Nota**: Esta fase es computacionalmente intensiva ya que ejecuta el pipeline completo múltiples veces (número de combinaciones × 2 ejecuciones por combinación). Para una cuadrícula de 3×3, esto significa 18 ejecuciones completas del pipeline.
+
+### Fase 9: Ajuste del estimador no paramétrico (con mejores hiperparámetros)
 
 - **Entrenamiento del estimador**: Entrena un estimador Nadaraya-Watson (`MuSigmaNonParam`) con:
-  - **Anchos de banda**: `H_MU` para la media condicional y `H_SIGMA` para la volatilidad condicional.
+  - **Anchos de banda optimizados**: Usa los mejores valores de `h_mu` y `h_sigma` encontrados en la fase anterior.
   - **Datos de entrada**: Matriz `X` de estados del mercado y vector `y` de retornos futuros.
-- **Modelo no paramétrico**: El estimador aprende la función de drift `μ(Z_t)` y volatilidad `σ(Z_t)` sin imponer forma funcional.
+  - **Modelo no paramétrico**: El estimador aprende la función de drift `μ(Z_t)` y volatilidad `σ(Z_t)` sin imponer forma funcional.
 
-### Fase 9: Simulación de trayectorias sintéticas
+### Fase 10: Simulación de trayectorias sintéticas
 
 - **Simulación SDE**: Utiliza el esquema de Euler-Maruyama para simular `N_PATHS` trayectorias sintéticas:
   - **Precio inicial**: Último precio del conjunto de entrenamiento.
@@ -181,7 +219,7 @@ El pipeline ejecuta las siguientes fases en orden secuencial:
   ```
   donde `Z_t` se actualiza dinámicamente durante la simulación.
 
-### Fase 10: Validación del simulador
+### Fase 11: Validación del simulador
 
 - **Validación estadística**: Compara propiedades estadísticas entre precios reales y sintéticos:
   - **Test de Kolmogorov-Smirnov**: Compara distribuciones de retornos y realized volatility.
@@ -189,7 +227,7 @@ El pipeline ejecuta las siguientes fases en orden secuencial:
 - **Decisión binaria**: El simulador se considera válido (`simulator_ok = True`) si ambas estadísticas KS están por debajo de umbrales predefinidos.
 - **Registro de diagnóstico**: Se guardan todas las métricas de validación para análisis posterior.
 
-### Fase 11: Generación de trades sintéticos (condicional)
+### Fase 12: Generación de trades sintéticos (condicional)
 
 - **Generación condicional**: Solo se ejecuta si `simulator_ok == True`.
 - **Aplicación de estrategia**: Aplica la misma lógica de generación de trades (`generate_trades_from_paths()`) a las trayectorias sintéticas:
@@ -199,7 +237,7 @@ El pipeline ejecuta las siguientes fases en orden secuencial:
 - **Binarización**: Convierte etiquetas `{1, -1}` a `{1, 0}` y marca `is_synth = 1`.
 - **Limitación de volumen**: Limita el número de trades sintéticos a `rho_max * len(train_real)` para evitar dominancia sobre trades reales.
 
-### Fase 12: Entrenamiento del clasificador
+### Fase 13: Entrenamiento del clasificador
 
 - **Combinación de datos**: Concatena `train_real` y `train_synth` (si están disponibles) en un único DataFrame de entrenamiento.
 - **Preparación de características**: Selecciona las columnas especificadas en `FEATURE_COLS` como variables predictoras.
@@ -208,7 +246,7 @@ El pipeline ejecuta las siguientes fases en orden secuencial:
   - **Métricas internas**: Calcula AUC, F1 y MCC en el conjunto de validación interna.
 - **Preparación de etiquetas**: Usa la columna `label` binarizada (`{0, 1}`) como variable objetivo.
 
-### Fase 13: Evaluación fuera de muestra
+### Fase 14: Evaluación fuera de muestra
 
 - **Predicción en test**: Evalúa el clasificador entrenado en el conjunto de prueba (`test_real`):
   - **Probabilidades**: Calcula probabilidades predichas `p = P(y=1 | X)`.
@@ -219,7 +257,7 @@ El pipeline ejecuta las siguientes fases en orden secuencial:
   - **MCC (Matthews Correlation Coefficient)**: Correlación entre predicciones y valores reales.
 - **Sin fuga de información**: Todas las métricas se calculan exclusivamente en datos nunca vistos durante el entrenamiento.
 
-### Fase 14: Guardado de resultados
+### Fase 15: Guardado de resultados
 
 - **Resumen CSV**: Guarda un resumen en `OUT_SUMMARY_CSV` con:
   - Rangos de entrenamiento y prueba.
@@ -325,6 +363,20 @@ OUT_FULL_JSON=walkforward_full_results.json
 ```bash
 python pipeline_main.py
 ```
+
+El pipeline ejecuta automáticamente dos etapas principales:
+
+1. **Optimización de hiperparámetros** (`run_bandwidth_tuning()`):
+   - Realiza una búsqueda en cuadrícula sobre combinaciones de `(h_mu, h_sigma)`.
+   - Para cada combinación, ejecuta el pipeline completo con y sin sintéticos.
+   - Selecciona los mejores hiperparámetros según métricas fuera de muestra.
+   - Guarda resultados en `bandwidth_tuning_results.csv` y `best_bandwidth.json`.
+
+2. **Evaluación final** (`run_final_pipeline()`):
+   - Ejecuta el pipeline completo una vez más con los mejores hiperparámetros encontrados.
+   - Guarda resultados finales en los archivos especificados en la configuración.
+
+**Nota sobre rendimiento**: La optimización de hiperparámetros puede ser computacionalmente intensiva. Para una cuadrícula de 3×3 valores, el pipeline se ejecuta 18 veces (9 combinaciones × 2 ejecuciones por combinación). Puedes reducir el tamaño de la cuadrícula en `run_bandwidth_tuning()` para acelerar la ejecución durante pruebas.
 
 ### Ejecución rápida (test)
 
