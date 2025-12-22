@@ -126,6 +126,7 @@ def generate_trades(
     side: str = "long",
     feature_window: int = 20,
     feature_cols: list[str] | None = None,
+    lag_price_features: bool = True,  # Lag price columns by 1 period to avoid look-ahead bias
 ) -> list[dict]:
     """
     Replicates your current logic.
@@ -217,7 +218,22 @@ def generate_trades(
                 
                 # Extract feature from price_df if it exists
                 if feat_col in price_df.columns:
-                    feat_val = price_df[feat_col].iloc[e]
+                    # Determine if this is a price column (needs lagging to avoid look-ahead bias)
+                    price_columns = ["close_price", "high_price", "low_price", "bid_price_close", 
+                                     "ask_price_close", "bid_price_high", "bid_price_low",
+                                     "ask_price_high", "ask_price_low", price_col]
+                    is_price_col = feat_col in price_columns or feat_col == high_col or feat_col == low_col
+                    
+                    # For price columns, use lagged value (e-1) to avoid look-ahead bias
+                    # For other features, use current value (e)
+                    if lag_price_features and is_price_col and e > 0:
+                        feat_val = price_df[feat_col].iloc[e - 1]  # Lag by 1 period
+                    elif lag_price_features and is_price_col and e == 0:
+                        # Can't lag at index 0, use NaN
+                        feat_val = np.nan
+                    else:
+                        feat_val = price_df[feat_col].iloc[e]  # Use current value for non-price features
+                    
                     # Convert to float, handling NaN
                     if pd.isna(feat_val):
                         feat[feat_col] = np.nan
