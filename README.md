@@ -160,6 +160,7 @@ SLOW_MA_PERIOD=30
 METHOD=atr
 PAST_BARS=50
 SIDE=long
+FEATURE_WINDOW=20
 
 # ============================================
 # State / Nonparametric Estimator
@@ -215,10 +216,7 @@ Para una ejecución rápida de prueba, puedes usar estos valores reducidos en tu
 
 ```env
 # Valores reducidos para test rápido
-TRAIN_BARS=1000
-TEST_BARS=200
-STEP_BARS=200
-MAX_FOLDS=10
+TRAIN_SPLIT=0.8
 N_PATHS=50
 N_STEPS=500
 BURNIN=100

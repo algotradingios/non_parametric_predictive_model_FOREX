@@ -56,7 +56,11 @@ def compute_basic_state(
 
     valid_r = r[1:]
     if len(valid_r) < warmup + 2:
-        raise ValueError("Not enough data for warmup variance and lagged states.")
+        raise ValueError(
+            f"Not enough data for warmup variance and lagged states. "
+            f"Need at least {warmup + 2} data points, but only have {len(valid_r)}. "
+            f"Consider reducing warmup (current: {warmup}) or vol_window (current: {vol_window})."
+        )
 
     # Initial variance from first warmup returns
     init_slice = valid_r[:warmup]
@@ -81,8 +85,18 @@ def compute_basic_state(
 
     df_out = df.dropna(subset=["r", "r_lag1", "lvol_lag1"]).reset_index(drop=True)
 
+    if len(df_out) == 0:
+        raise ValueError(
+            f"No valid samples after state computation. "
+            f"Input had {len(df)} rows, but after warmup ({warmup}) and dropping NaNs, "
+            f"no valid samples remain. Consider reducing warmup or vol_window."
+        )
+
     X = df_out[["r_lag1", "lvol_lag1"]].to_numpy(dtype=float)
     y = df_out["r"].to_numpy(dtype=float)
+    
+    if len(X) == 0 or len(y) == 0:
+        raise ValueError(f"Empty arrays after state computation: X.shape={X.shape}, y.shape={y.shape}")
 
     init_sigma_rec = float(np.nanmedian(df_out["sigma_hat"].to_numpy()))
     init_sigma_rec = max(init_sigma_rec, 1e-6)

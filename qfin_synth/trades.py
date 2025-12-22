@@ -124,6 +124,7 @@ def generate_trades(
     high_col: str | None = None,
     low_col: str | None = None,
     side: str = "long",
+    feature_window: int = 20,
 ) -> list[dict]:
     """
     Replicates your current logic.
@@ -137,13 +138,25 @@ def generate_trades(
 
     prices = price_df[price_col].astype(float)
     
+    # Handle missing values: forward fill then backward fill
+    n_missing_before = prices.isna().sum()
+    if n_missing_before > 0:
+        prices = prices.ffill().bfill()
+        n_missing_after = prices.isna().sum()
+        if n_missing_after > 0:
+            raise ValueError(f"Cannot fill all missing prices. Still have {n_missing_after} NaN values after forward/backward fill.")
+    
     # Extract high and low prices if available
     high_prices = None
     low_prices = None
     if high_col and high_col in price_df.columns:
         high_prices = price_df[high_col].astype(float)
+        if high_prices.isna().any():
+            high_prices = high_prices.ffill().bfill()
     if low_col and low_col in price_df.columns:
         low_prices = price_df[low_col].astype(float)
+        if low_prices.isna().any():
+            low_prices = low_prices.ffill().bfill()
     
     long_entries, short_entries = ma_cross_entries(prices, fast_ma_period=fast_ma_period, slow_ma_period=slow_ma_period)
 
@@ -172,23 +185,42 @@ def generate_trades(
             low_prices=low_prices,
         )
 
+        # Compute features, handling cases where there isn't enough history
+        price_in = prices.iloc[e]
+        price_out = prices.iloc[exit_idx]
+        
+        # Skip if prices are NaN
+        if pd.isna(price_in) or pd.isna(price_out):
+            continue
+        
+        # Compute rolling features with proper handling of insufficient history
+        # Note: pct_change[0] is always NaN (no previous value), so we use min_periods to handle this
+        pct_change = prices.pct_change(fill_method=None)
+        # Use min_periods=feature_window to require full window, but skip NaN values in calculation
+        # This ensures we get NaN only if there aren't enough valid values, not just because of one NaN
+        mom_val = pct_change.rolling(feature_window, min_periods=feature_window).mean().iloc[e] if e >= feature_window else np.nan
+        vol_val = pct_change.rolling(feature_window, min_periods=feature_window).std().iloc[e] if e >= feature_window else np.nan
+        
+        # MA ratio needs at least slow_ma_period bars
+        fast_ma_val = prices.rolling(fast_ma_period).mean().iloc[e] if e >= fast_ma_period - 1 else np.nan
+        slow_ma_val = prices.rolling(slow_ma_period).mean().iloc[e] if e >= slow_ma_period - 1 else np.nan
+        ma_ratio_val = fast_ma_val / (slow_ma_val + 1e-12) if not (pd.isna(fast_ma_val) or pd.isna(slow_ma_val)) else np.nan
+        
         feat = {
             "entry_idx": int(e),
             "exit_idx": int(exit_idx),
             "hold_bars": int(exit_idx - e),
-            "price_in": float(prices.iloc[e]),
-            "price_out": float(prices.iloc[exit_idx]),
-            "ret_log": float(np.log(prices.iloc[exit_idx] / prices.iloc[e])),
-            "mom20": float(prices.pct_change(fill_method=None).rolling(20).mean().iloc[e]),
-            "vol20": float(prices.pct_change(fill_method=None).rolling(20).std().iloc[e]),
-            "ma_ratio": float(
-                (prices.rolling(fast_ma_period).mean().iloc[e]) /
-                (prices.rolling(slow_ma_period).mean().iloc[e] + 1e-12)
-            ),
+            "price_in": float(price_in),
+            "price_out": float(price_out),
+            "ret_log": float(np.log(price_out / price_in)),
+            "mom20": float(mom_val) if not pd.isna(mom_val) else np.nan,
+            "vol20": float(vol_val) if not pd.isna(vol_val) else np.nan,
+            "ma_ratio": float(ma_ratio_val) if not pd.isna(ma_ratio_val) else np.nan,
             "label": int(label),
-            "exit_rt_abs": float(exit_rt),  # NEW: keep the absolute return your barrier logic used
+            "exit_rt_abs": float(exit_rt),
             "side": "long",
         }
+        # breakpoint()
         trades.append(feat)
 
     return trades

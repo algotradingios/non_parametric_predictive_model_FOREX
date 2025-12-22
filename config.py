@@ -31,13 +31,10 @@ class AppConfig(BaseSettings):
     timezone: Optional[str] = Field(None, description="Optional timezone name (e.g., 'Europe/Madrid')")
 
     # -----------------------
-    # Walk-forward
+    # Train/Test Split
     # -----------------------
-    train_bars: int = Field(2500, ge=100)
-    test_bars: int = Field(500, ge=50)
-    step_bars: Optional[int] = Field(None, ge=1, description="If None, defaults to test_bars inside code")
+    train_split: float = Field(0.8, gt=0.0, lt=1.0, description="Fraction of data to use for training (e.g., 0.8 = 80% train, 20% test)")
     embargo: Optional[int] = Field(None, ge=0, description="If None, defaults to H")
-    max_folds: Optional[int] = Field(None, ge=1, description="Maximum number of folds to process. If None, processes all folds")
 
     # -----------------------
     # Trades / labeling
@@ -50,6 +47,7 @@ class AppConfig(BaseSettings):
     method: Literal["atr", "std"] = Field("atr")
     past_bars: int = Field(50, ge=2)
     side: Literal["long"] = Field("long")  # keep aligned with your current implementation
+    feature_window: int = Field(20, ge=1, description="Rolling window period for mom20 and vol20 features")
 
     # -----------------------
     # State / nonparametric estimator

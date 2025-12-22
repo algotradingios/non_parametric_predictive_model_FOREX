@@ -10,7 +10,7 @@ from qfin_synth.nw import MuSigmaNonParam
 from qfin_synth.sde import simulate_paths
 from qfin_synth.trades import generate_trades, generate_trades_from_paths
 from qfin_synth.models import train_classifier
-from qfin_synth.walkforward import walk_forward_splits, filter_trades_for_fold
+from qfin_synth.walkforward import filter_trades_for_fold
 from qfin_synth.validation import validate_simulator
 
 # Configure logging
@@ -46,13 +46,11 @@ def run_pipeline_walkforward(
     slow_ma_period: int = 30,
     method: str = "atr",
     past_bars: int = 50,
+    feature_window: int = 20,
 
-    # walk-forward
-    train_bars: int = 2500,
-    test_bars: int = 500,
-    step_bars: int | None = None,
+    # train/test split
+    train_split: float = 0.8,  # Fraction of data to use for training (0.8 = 80%)
     embargo: int | None = None,
-    max_folds: int | None = None,
 
     # synthetic usage
     rho_max: float = 2.0,      # max ratio synthetic:real trades in train (cap)
@@ -70,7 +68,7 @@ def run_pipeline_walkforward(
     total_rows = sum(1 for _ in open(historical_csv, 'r')) - 1  # -1 for header
     rows_to_read = max(1, int(total_rows * 0.1))  # 10% of rows, at least 1
     logger.info(f"Reading {rows_to_read} rows ({rows_to_read/total_rows*100:.1f}%) out of {total_rows} total rows")
-    df_hist = pd.read_csv(historical_csv, index_col=time_col, parse_dates=True, nrows=rows_to_read).sort_index()
+    df_hist = pd.read_csv(historical_csv, index_col=time_col, parse_dates=True).sort_index().head(rows_to_read) # using nrows to read only 10% of the data doesnt'work because of misordering
     prices = df_hist[price_col].astype(float)
     n_bars = len(prices)
     logger.info(f"Loaded {n_bars} price bars from {df_hist.index[0]} to {df_hist.index[-1]}")
@@ -88,6 +86,8 @@ def run_pipeline_walkforward(
     
     price_df = df_hist[list(price_df_cols.keys())].rename(columns=price_df_cols)
 
+    # breakpoint()
+
     # 2) Precompute REAL trades once on full series (no leakage yet; we will filter per fold)
     logger.info("Generating real trades from historical data...")
     real_trades_list = generate_trades(
@@ -99,167 +99,181 @@ def run_pipeline_walkforward(
         high_col="high_price" if high_col else None,
         low_col="low_price" if low_col else None,
         side="long",
+        feature_window=feature_window,
     )
     real_trades_all = pd.DataFrame(real_trades_list)
     if len(real_trades_all) == 0:
         raise ValueError("No real trades generated. Check strategy parameters and data.")
     logger.info(f"Generated {len(real_trades_all)} real trades")
 
-    # 3) Walk-forward splits
-    logger.info(f"Computing walk-forward splits (train_bars={train_bars}, test_bars={test_bars}, step_bars={step_bars}, max_folds={max_folds})")
-    splits = walk_forward_splits(n_bars=n_bars, train_bars=train_bars, test_bars=test_bars, step_bars=step_bars, max_folds=max_folds)
-    logger.info(f"Created {len(splits)} walk-forward folds")
+    # breakpoint()
+    # 3) Simple train/test split (80% train, 20% test)
+    train_split = 0.8
+    train_end_idx = int(n_bars * train_split)
+    tr0, tr1 = 0, train_end_idx - 1
+    te0, te1 = train_end_idx, n_bars - 1
+    
+    logger.info(f"Using simple train/test split: Train [0:{tr1}] ({train_split*100:.0f}%), Test [{te0}:{te1}] ({(1-train_split)*100:.0f}%)")
 
     fold_results = []
+    fold = 1  # Single fold
+    
+    logger.info(f"Fold {fold}: Train [{tr0}:{tr1}], Test [{te0}:{te1}]")
+    # 3a) Select train/test price segments
+    prices_train = prices.iloc[tr0:tr1+1]
+    prices_test = prices.iloc[te0:te1+1]
 
-    for fold, (tr0, tr1, te0, te1) in enumerate(tqdm(splits, desc="Processing folds"), start=1):
-        logger.info(f"Fold {fold}/{len(splits)}: Train [{tr0}:{tr1}], Test [{te0}:{te1}]")
-        # 3a) Select train/test price segments
-        prices_train = prices.iloc[tr0:tr1+1]
-        prices_test = prices.iloc[te0:te1+1]
+    # breakpoint()
+    # 3b) Filter REAL trades for this fold (no leakage by exit_idx embargo)
+    train_real, test_real = filter_trades_for_fold(
+        trades=real_trades_all,
+        train_start=tr0, train_end=tr1,
+        test_start=te0, test_end=te1,
+        embargo=embargo,
+    )
+    # Binary setup: drop label==0, map {1,-1}->{1,0}
+    train_real = train_real[train_real["label"].isin([1, -1])].copy()
+    test_real = test_real[test_real["label"].isin([1, -1])].copy()
+    
+    # Remove trades with NaN features (insufficient history or missing price data)
+    feature_cols = ["mom20", "vol20", "ma_ratio"]
+    train_real = train_real.dropna(subset=feature_cols + ["price_in"]).copy()
+    test_real = test_real.dropna(subset=feature_cols + ["price_in"]).copy()
+    
+    train_real["label_bin"] = (train_real["label"] == 1).astype(int)
+    test_real["label_bin"] = (test_real["label"] == 1).astype(int)
+    train_real["is_synth"] = 0
+    test_real["is_synth"] = 0
 
-        # 3b) Filter REAL trades for this fold (no leakage by exit_idx embargo)
-        train_real, test_real = filter_trades_for_fold(
-            trades=real_trades_all,
-            train_start=tr0, train_end=tr1,
-            test_start=te0, test_end=te1,
-            embargo=embargo,
-        )
-        # Binary setup: drop label==0, map {1,-1}->{1,0}
-        train_real = train_real[train_real["label"].isin([1, -1])].copy()
-        test_real = test_real[test_real["label"].isin([1, -1])].copy()
-        train_real["label_bin"] = (train_real["label"] == 1).astype(int)
-        test_real["label_bin"] = (test_real["label"] == 1).astype(int)
-        train_real["is_synth"] = 0
-        test_real["is_synth"] = 0
-
-        if len(train_real) < min_train_trades or len(test_real) < min_test_trades:
-            # Fold too thin; skip or relax parameters
-            logger.warning(f"Fold {fold} skipped: Too few trades (train={len(train_real)}<{min_train_trades}, test={len(test_real)}<{min_test_trades})")
-            fold_results.append({
-                "fold": fold, "train_range": (tr0,tr1), "test_range": (te0,te1),
-                "skipped": True, "reason": f"Too few trades in train/test after purging (train={len(train_real)}, test={len(test_real)})"
-            })
-            continue
-
-        logger.info(f"Fold {fold}: {len(train_real)} train trades, {len(test_real)} test trades")
-
-        # 4) Fit mu/sigma using ONLY training prices
-        logger.info(f"Fold {fold}: Computing state and fitting non-parametric estimator...")
-        df_for_state = pd.DataFrame({
-            "time": prices_train.index,
-            "price": prices_train.values,
-        })
-        df_state, X, y, meta = compute_basic_state(
-            df_for_state, price_col="price", time_col="time",
-            vol_window=vol_window, alpha=alpha, warmup=warmup
-        )
-        est = MuSigmaNonParam(h_mu=h_mu, h_sigma=h_sigma).fit(X, y)
-        logger.info(f"Fold {fold}: Fitted estimator on {len(X)} training samples")
-
-        # 5) Simulate synthetic paths (train-only)
-        logger.info(f"Fold {fold}: Simulating {n_paths} synthetic paths ({n_steps} steps each)...")
-        synth_prices = simulate_paths(
-            est=est,
-            start_price=float(prices_train.iloc[-1]),
-            n_paths=n_paths,
-            n_steps=n_steps,
-            dt=dt,
-            ewma_alpha=meta["alpha"],
-            burnin=burnin,
-            init_sigma=meta["init_sigma_recommended"],
-            seed=123 + fold,
-        )
-
-        logger.info(f"Fold {fold}: Generated {len(synth_prices) // n_steps} synthetic paths")
-
-        # 6) Validate simulator BEFORE using synthetics
-        logger.info(f"Fold {fold}: Validating simulator...")
-        sim_diag = validate_simulator(
-            real_prices=prices_train,
-            synth_prices_df=synth_prices,
-            price_col_synth="price",
-            path_col="path",
-            max_lag=20,
-            vol_window=20,
-        )
-
-        # 7) Generate synthetic trades only if simulator passes
-        synth_trades = pd.DataFrame()
-        use_synth = bool(sim_diag["simulator_ok"])
-        logger.info(f"Fold {fold}: Simulator validation: {'PASSED' if use_synth else 'FAILED'} "
-                   f"(KS ret={sim_diag.get('ks_ret_stat', 'N/A'):.3f}, "
-                   f"KS RV={sim_diag.get('ks_rv_stat', 'N/A'):.3f})")
-
-        if use_synth:
-            logger.info(f"Fold {fold}: Generating synthetic trades...")
-            synth_trades = generate_trades_from_paths(
-                synth_prices,
-                time_col="t",
-                path_col="path",
-                price_col_in="price",
-                out_price_col="close_price",
-                H=H, tp_mult=tp_mult, sl_mult=sl_mult,
-                fast_ma_period=fast_ma_period, slow_ma_period=slow_ma_period,
-                method=method, past_bars=past_bars,
-                side="long",
-            )
-            if len(synth_trades) > 0:
-                synth_trades = synth_trades[synth_trades["label"].isin([1, -1])].copy()
-                synth_trades["label_bin"] = (synth_trades["label"] == 1).astype(int)
-                synth_trades["is_synth"] = 1
-
-                # Cap synthetic volume to rho_max * real trades (avoid dominating)
-                cap = int(rho_max * len(train_real))
-                if len(synth_trades) > cap:
-                    logger.info(f"Fold {fold}: Capping synthetic trades from {len(synth_trades)} to {cap}")
-                    synth_trades = synth_trades.sample(n=cap, random_state=42)
-            logger.info(f"Fold {fold}: Generated {len(synth_trades)} synthetic trades")
-
-        # 8) Train classifier on train_real (+ optional synth)
-        train_df = pd.concat([train_real, synth_trades], ignore_index=True) if use_synth else train_real.copy()
-        train_df = train_df.rename(columns={"label_bin": "label"})
-        test_df = test_real.rename(columns={"label_bin": "label"})
-        logger.info(f"Fold {fold}: Training classifier ({len(train_df)} samples)...")
-
-        clf, metrics = train_classifier(
-            train_df,
-            feature_cols=["mom20", "vol20", "ma_ratio", "hold_bars", "is_synth"],
-            test_size=0.2,  # internal split only for quick sanity; NOT the final evaluation
-            seed=42,
-        )
-
-        # 9) True walk-forward evaluation: predict on test_df
-        logger.info(f"Fold {fold}: Evaluating on test set ({len(test_df)} samples)...")
-        X_test = test_df[["mom20", "vol20", "ma_ratio", "hold_bars", "is_synth"]].to_numpy(dtype=float)
-        y_test = test_df["label"].astype(int).to_numpy()
-        p = clf.predict_proba(X_test)[:, 1]
-        yhat = (p >= 0.5).astype(int)
-
-        # Compute fold metrics (manual, minimal)
-        from sklearn.metrics import roc_auc_score, f1_score, matthews_corrcoef
-
-        fold_eval = {
-            "auc_test": float(roc_auc_score(y_test, p)),
-            "f1_test": float(f1_score(y_test, yhat)),
-            "mcc_test": float(matthews_corrcoef(y_test, yhat)),
-        }
-        logger.info(f"Fold {fold}: Test metrics - AUC={fold_eval['auc_test']:.4f}, "
-                   f"F1={fold_eval['f1_test']:.4f}, MCC={fold_eval['mcc_test']:.4f}")
-
+    if len(train_real) < min_train_trades or len(test_real) < min_test_trades:
+        # Fold too thin; skip or relax parameters
+        logger.warning(f"Fold {fold} skipped: Too few trades (train={len(train_real)}<{min_train_trades}, test={len(test_real)}<{min_test_trades})")
         fold_results.append({
-            "fold": fold,
-            "train_range": (tr0, tr1),
-            "test_range": (te0, te1),
-            "n_train_real": int(len(train_real)),
-            "n_train_synth": int(len(synth_trades)) if use_synth else 0,
-            "n_test_real": int(len(test_real)),
-            "used_synth": bool(use_synth),
-            "sim_diag": sim_diag,
-            "train_metrics_internal": metrics,
-            "test_metrics_walkforward": fold_eval,
-            "skipped": False,
+            "fold": fold, "train_range": (tr0,tr1), "test_range": (te0,te1),
+            "skipped": True, "reason": f"Too few trades in train/test after purging (train={len(train_real)}, test={len(test_real)})"
         })
+        return fold_results
+
+    logger.info(f"Fold {fold}: {len(train_real)} train trades, {len(test_real)} test trades")
+
+    # breakpoint()
+    # 4) Fit mu/sigma using ONLY training prices
+    logger.info(f"Fold {fold}: Computing state and fitting non-parametric estimator...")
+    df_for_state = pd.DataFrame({
+        "time": prices_train.index,
+        "price": prices_train.values,
+    })
+    df_state, X, y, meta = compute_basic_state(
+        df_for_state, price_col="price", time_col="time",
+        vol_window=vol_window, alpha=alpha, warmup=warmup
+    )
+    
+    if len(X) == 0 or len(y) == 0:
+        logger.warning(f"Fold {fold} skipped: No valid state samples after computation (X.shape={X.shape}, y.shape={y.shape}, train_bars={len(prices_train)})")
+        fold_results.append({
+            "fold": fold, "train_range": (tr0,tr1), "test_range": (te0,te1),
+            "skipped": True, "reason": f"No valid state samples (X.shape={X.shape}, train_bars={len(prices_train)})"
+        })
+        return fold_results
+    
+    est = MuSigmaNonParam(h_mu=h_mu, h_sigma=h_sigma).fit(X, y)
+    logger.info(f"Fold {fold}: Fitted estimator on {len(X)} training samples")
+
+    #  breakpoint()
+    # 5) Simulate synthetic paths (train-only)
+    logger.info(f"Fold {fold}: Simulating {n_paths} synthetic paths ({n_steps} steps each)...")
+    synth_prices = simulate_paths(
+        est=est,
+        start_price=float(prices_train.iloc[-1]),
+        n_paths=n_paths,
+        n_steps=n_steps,
+        dt=dt,
+        ewma_alpha=meta["alpha"],
+        burnin=burnin,
+        init_sigma=meta["init_sigma_recommended"],
+        seed=123 + fold,
+    )
+
+    logger.info(f"Fold {fold}: Generated {len(synth_prices) // n_steps} synthetic paths")
+
+    # 6) Validate simulator BEFORE using synthetics
+    logger.info(f"Fold {fold}: Validating simulator...")
+    sim_diag = validate_simulator(
+        real_prices=prices_train,
+        synth_prices_df=synth_prices,
+        price_col_synth="price",
+        path_col="path",
+        max_lag=20,
+        vol_window=20,
+    )
+
+    # 7) Generate synthetic trades only if simulator passes
+    synth_trades = pd.DataFrame()
+    use_synth = bool(sim_diag["simulator_ok"])
+    logger.info(f"Fold {fold}: Simulator validation: {'PASSED' if use_synth else 'FAILED'} "
+               f"(KS ret={sim_diag.get('ks_ret_stat', 'N/A'):.3f}, "
+               f"KS RV={sim_diag.get('ks_rv_stat', 'N/A'):.3f})")
+
+    if use_synth:
+        logger.info(f"Fold {fold}: Generating synthetic trades...")
+        synth_trades = generate_trades_from_paths(synth_prices, feature_window=feature_window)
+        if len(synth_trades) > 0:
+            synth_trades = synth_trades[synth_trades["label"].isin([1, -1])].copy()
+            synth_trades["label_bin"] = (synth_trades["label"] == 1).astype(int)
+            synth_trades["is_synth"] = 1
+
+            # Cap synthetic volume to rho_max * real trades (avoid dominating)
+            cap = int(rho_max * len(train_real))
+            if len(synth_trades) > cap:
+                logger.info(f"Fold {fold}: Capping synthetic trades from {len(synth_trades)} to {cap}")
+                synth_trades = synth_trades.sample(n=cap, random_state=42)
+        logger.info(f"Fold {fold}: Generated {len(synth_trades)} synthetic trades")
+
+    # 8) Train classifier on train_real (+ optional synth)
+    train_df = pd.concat([train_real, synth_trades], ignore_index=True) if use_synth else train_real.copy()
+    # Drop the old "label" column (with values 1/-1) and rename "label_bin" to "label" (with values 0/1)
+    train_df = train_df.drop(columns=["label"]).rename(columns={"label_bin": "label"})
+    test_df = test_real.drop(columns=["label"]).rename(columns={"label_bin": "label"})
+    logger.info(f"Fold {fold}: Training classifier ({len(train_df)} samples)...")
+
+    clf, metrics = train_classifier(
+        train_df,
+        feature_cols=feature_cols,
+        test_size=0.2,  # internal split only for quick sanity; NOT the final evaluation
+        seed=42,
+    )
+
+    # 9) Evaluate on test set
+    logger.info(f"Fold {fold}: Evaluating on test set ({len(test_df)} samples)...")
+    X_test = test_df[feature_cols].to_numpy(dtype=float)
+    y_test = test_df["label"].astype(int).to_numpy()
+    p = clf.predict_proba(X_test)[:, 1]
+    yhat = (p >= 0.5).astype(int)
+
+    # Compute fold metrics (manual, minimal)
+    from sklearn.metrics import roc_auc_score, f1_score, matthews_corrcoef
+
+    fold_eval = {
+        "auc_test": float(roc_auc_score(y_test, p)),
+        "f1_test": float(f1_score(y_test, yhat)),
+        "mcc_test": float(matthews_corrcoef(y_test, yhat)),
+    }
+    logger.info(f"Fold {fold}: Test metrics - AUC={fold_eval['auc_test']:.4f}, "
+               f"F1={fold_eval['f1_test']:.4f}, MCC={fold_eval['mcc_test']:.4f}")
+
+    fold_results.append({
+        "fold": fold,
+        "train_range": (tr0, tr1),
+        "test_range": (te0, te1),
+        "n_train_real": int(len(train_real)),
+        "n_train_synth": int(len(synth_trades)) if use_synth else 0,
+        "n_test_real": int(len(test_real)),
+        "used_synth": bool(use_synth),
+        "sim_diag": sim_diag,
+        "train_metrics_internal": metrics,
+        "test_metrics_walkforward": fold_eval,
+        "skipped": False,
+    })
 
     return fold_results
 
@@ -273,12 +287,9 @@ def main(cfg: AppConfig):
         time_col=cfg.time_col,
         price_col=cfg.price_col,
 
-        # walk-forward
-        train_bars=cfg.train_bars,
-        test_bars=cfg.test_bars,
-        step_bars=cfg.step_bars,
+        # train/test split
+        train_split=cfg.train_split,
         embargo=cfg.embargo,
-        max_folds=cfg.max_folds,
 
         # trades
         H=cfg.H,
@@ -288,6 +299,7 @@ def main(cfg: AppConfig):
         slow_ma_period=cfg.slow_ma_period,
         method=cfg.method,
         past_bars=cfg.past_bars,
+        feature_window=cfg.feature_window,
 
         # state / simulator
         vol_window=cfg.vol_window,
